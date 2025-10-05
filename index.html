@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Maestro: MusicXML + MIDI Practice (iPad)</title>
+  <!-- TailwindCSS (CDN) -->
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <!-- Libraries -->
+  <script src="https://unpkg.com/opensheetmusicdisplay@1.8.4/build/opensheetmusicdisplay.min.js"></script>
+  <script src="https://unpkg.com/tone@14.8.49/build/Tone.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/localforage@1.10.0/dist/localforage.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+  <script src="https://unpkg.com/web-audio-scheduler@1.0.0/dist/web-audio-scheduler.min.js"></script>
+  <!-- PWA-ish meta -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <style>
+    html, body { height: 100%; }
+    .card { @apply bg-white rounded-2xl shadow p-4; }
+    .pill { @apply inline-flex items-center rounded-full px-3 py-1 text-sm; }
+    .pill-ok { @apply bg-green-100 text-green-800; }
+    .pill-bad { @apply bg-red-100 text-red-800; }
+    .pill-warn { @apply bg-yellow-100 text-yellow-800; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div class="max-w-7xl mx-auto p-4 space-y-4">
+    <header class="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+      <div>
+        <h1 class="text-2xl font-semibold">Maestro · MusicXML + MIDI Practice</h1>
+        <p class="text-sm text-gray-600">Runs in <span class="font-medium">Web MIDI Browser</span> on iPad. 100% client-side.</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button id="btnOpen" class="px-3 py-2 rounded-xl bg-gray-900 text-white">Open MusicXML</button>
+        <input id="fileChooser" type="file" accept=".musicxml,.xml,.mxl,application/vnd.recordare.musicxml+xml" class="hidden">
+        <label class="flex items-center gap-2 text-sm">MIDI In
+          <select id="midiIn" class="ml-2 px-2 py-1 rounded-lg border"></select>
+        </label>
+        <label class="flex items-center gap-2 text-sm">BPM
+          <input id="bpm" type="range" min="30" max="220" value="90" class="w-40">
+          <span id="bpmVal" class="w-10 text-right">90</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm">Transpose
+          <input id="transpose" type="number" value="0" class="w-20 px-2 py-1 rounded-lg border" step="1"> <span class="text-xs text-gray-500">semitones</span>
+        </label>
+        <button id="btnStart" class="px-3 py-2 rounded-xl bg-green-600 text-white">Start</button>
+        <button id="btnStop" class="px-3 py-2 rounded-xl bg-red-600 text-white">Stop</button>
+      </div>
+    </header>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <section class="lg:col-span-2 card space-y-3">
+        <div class="flex items-center justify-between">
+          <div class="text-sm" id="fileInfo">No file loaded</div>
+          <div class="text-sm text-gray-600" id="status">Load a score, pick MIDI, set BPM, then Start.</div>
+        </div>
+        <div id="score" class="border rounded-xl overflow-auto" style="min-height: 360px"></div>
+        <div class="flex items-center gap-2">
+          <span id="bubble" class="pill bg-gray-200 text-gray-800">Waiting…</span>
+          <button id="btnRepeatMeasure" class="px-3 py-1.5 rounded-xl border">Repeat This Measure</button>
+          <button id="btnAB" class="px-3 py-1.5 rounded-xl border">Set A/B Loop</button>
+          <span id="abStatus" class="text-xs text-gray-500"></span>
+        </div>
+      </section>
+
+      <aside class="card space-y-3">
+        <h2 class="font-semibold">Live Stats</h2>
+        <div class="grid grid-cols-3 gap-2 text-center">
+          <div class="p-3 bg-gray-100 rounded-xl">
+            <div class="text-2xl font-semibold" id="statAcc">–</div>
+            <div class="text-xs text-gray-600">Accuracy</div>
+          </div>
+          <div class="p-3 bg-gray-100 rounded-xl">
+            <div class="text-2xl font-semibold" id="statOnTime">–</div>
+            <div class="text-xs text-gray-600">In-Time</div>
+          </div>
+          <div class="p-3 bg-gray-100 rounded-xl">
+            <div class="text-2xl font-semibold" id="statAvgDelta">–</div>
+            <div class="text-xs text-gray-600">Avg Δms</div>
+          </div>
+        </div>
+        <canvas id="chartAcc" height="160"></canvas>
+        <canvas id="chartDelta" height="160" class="mt-2"></canvas>
+        <div class="flex gap-2">
+          <button id="btnExportJSON" class="px-3 py-1.5 rounded-xl border w-full">Export JSON</button>
+          <button id="btnExportCSV" class="px-3 py-1.5 rounded-xl border w-full">Export CSV</button>
+        </div>
+        <div class="text-xs text-gray-500">Data saved locally. Clearing site data resets history.</div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+  // ===================== Helpers & Globals =====================
+  const el = (id) => document.getElementById(id);
+  const fmt = (n) => (isFinite(n) ? n.toFixed(0) : '–');
+  const midiName = (n) => {
+    const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    return names[(n%12+12)%12] + (Math.floor(n/12) - 1);
+  };
+  const bubble = (text, kind='info') => {
+    const b = el('bubble');
+    b.textContent = text;
+    b.className = 'pill ' + (kind==='ok' ? 'pill-ok' : kind==='bad' ? 'pill-bad' : kind==='warn' ? 'pill-warn' : 'bg-gray-200 text-gray-800');
+  };
+
+  let osmd, cursor;               // OSMD objects
+  let session = null;             // current practice session
+  let expected = [];              // linear expected notes with timing
+  let playing = false;            // transport state
+  let Aidx = null, Bidx = null;   // A/B loop indices
+
+  // Persistence
+  localforage.config({ name: 'maestro-practice' });
+
+  // Tone.js & Audio
+  let clickSynth, leadSynth;
+  const tone = {
+    async init() {
+      await Tone.start();
+      Tone.Transport.bpm.value = +el('bpm').value;
+      clickSynth = new Tone.MembraneSynth({ volume: -8 }).toDestination();
+      leadSynth = new Tone.Synth({ oscillator: { type: 'triangle' }, envelope: { release: 0.05 } }).toDestination();
+    },
+    scheduleMetronome() {
+      Tone.Transport.cancel();
+      Tone.Transport.scheduleRepeat((time) => {
+        clickSynth.triggerAttackRelease('C4', 0.03, time);
+      }, '4n');
+    },
+    async start() {
+      Tone.Transport.start();
+    },
+    stop() { Tone.Transport.stop(); }
+  };
+
+  // Web Audio Scheduler (optional finer timing)
+  const ac = Tone.getContext().rawContext;
+  const scheduler = new WebAudioScheduler({ context: ac });
+
+  // MIDI
+  let midiAccess, midiInput;
+  async function initMIDI() {
+    try {
+      midiAccess = await navigator.requestMIDIAccess({ sysex: false });
+      const sel = el('midiIn'); sel.innerHTML='';
+      midiAccess.inputs.forEach((input) => {
+        const opt = document.createElement('option');
+        opt.value = input.id; opt.textContent = input.name || `Input ${input.id}`;
+        sel.appendChild(opt);
+      });
+      sel.addEventListener('change', () => attachMIDI(sel.value));
+      const first = sel.options[0]; if (first) { sel.value = first.value; attachMIDI(first.value); }
+    } catch (e) { el('status').textContent = 'MIDI unavailable. Use Web MIDI Browser on iPad.'; }
+  }
+  function attachMIDI(id) {
+    if (midiInput) midiInput.onmidimessage = null;
+    midiInput = midiAccess.inputs.get(id);
+    if (midiInput) midiInput.onmidimessage = onMIDI;
+  }
+
+  // ===================== OSMD Loading & Parsing =====================
+  async function loadMusicXMLFromFile(file) {
+    el('fileInfo').textContent = file.name;
+    const buf = await file.arrayBuffer();
+    // If it's .mxl (compressed), OSMD accepts ArrayBuffer; for xml/musicxml we pass string
+    const isBinary = file.name.toLowerCase().endsWith('.mxl');
+    const content = isBinary ? buf : await file.text();
+    if (!osmd) {
+      osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay('score', { autoResize: true, drawTitle: true, followCursor: true });
+    }
+    await osmd.load(content);
+    await osmd.render();
+    cursor = osmd.cursor; cursor.show(); cursor.reset();
+    expected = buildExpected(osmd);
+    bubble('Score ready. Press Start for count-in.', 'warn');
+  }
+
+  // Build linear expected notes with timing placeholders
+  function buildExpected(osmd) {
+    const transp = +el('transpose').value || 0;
+    const arr = [];
+    const g = osmd.graphic;
+    let measureNum = 0;
+    for (const page of g.pages) {
+      for (const sys of page.musicSystems) {
+        for (const m of sys.measures) {
+          const src = m.parentSourceMeasure; measureNum = src?.MeasureNumber || measureNum;
+          const voices = src?.voices || [];
+          for (const v of voices) {
+            for (const ve of v.voiceEntries) {
+              const timestamp = ve.timestamp ? (ve.timestamp.RealValue || ve.timestamp.RealValue || 0) : 0; // beats from measure start (fraction)
+              for (const n of ve.notes) {
+                if (n.isRest()) continue;
+                const halfTone = n.halfTone + transp; // OSMD Pitch.halfTone ~ MIDI
+                arr.push({
+                  midi: halfTone,
+                  measure: measureNum,
+                  staffIndex: n.ParentStaff?.Id || 0,
+                  beat: timestamp, // relative beat within measure
+                  tExpected: 0, // seconds, filled later
+                  hit: false,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+    // compute absolute expected times (rough): measure/beat → seconds using BPM & time sig if available
+    const bpm = +el('bpm').value;
+    const secPerBeat = 60 / Math.max(30, Math.min(220, bpm));
+    let t = ac.currentTime + 2.0; // start after count-in
+    let lastMeasure = arr.length ? arr[0].measure : 1;
+    let beatOffset = 0;
+    for (const n of arr) {
+      if (n.measure !== lastMeasure) { beatOffset += 4; lastMeasure = n.measure; } // assume 4/4 if not parsed
+      n.tExpected = t + (beatOffset + n.beat) * secPerBeat;
+    }
+    return arr;
+  }
+
+  // ===================== Grading & Session =====================
+  function newSession(title) {
+    return {
+      id: Math.random().toString(36).slice(2),
+      startedAt: Date.now(),
+      bpm: +el('bpm').value,
+      pieceTitle: title || el('fileInfo').textContent || 'Untitled',
+      results: []
+    };
+  }
+
+  function tolMs() { // tempo-scaled window
+    const bpm = +el('bpm').value;
+    return Math.max(60, Math.min(150, 24000 / bpm));
+  }
+
+  function onMIDI(e) {
+    if (!playing) return;
+    const [st, note, vel] = e.data;
+    const isOn = (st & 0xf0) === 0x90 && vel > 0;
+    if (!isOn) return;
+
+    // choose candidate expected note: next 1–3 not yet hit, gated by A/B loop if set
+    let idx = expected.findIndex(n => !n.hit);
+    if (Aidx != null && idx < Aidx) idx = Aidx; // jump to A
+    const endIdx = (Bidx != null ? Math.min(Bidx, idx + 3) : idx + 3);
+    const window = expected.slice(idx, endIdx + 1);
+    let best = null;
+    for (const n of window) {
+      const delta = (ac.currentTime - n.tExpected) * 1000;
+      const score = Math.abs(delta) + (note !== n.midi ? 1000 : 0);
+      if (!best || score < best.score) best = { n, delta, correctPitch: note === n.midi, score };
+    }
+    if (!best) return;
+
+    const within = Math.abs(best.delta) <= tolMs();
+    best.n.hit = best.n.hit || best.correctPitch; // only latch on correct pitch
+
+    // record
+    const rec = {
+      measure: best.n.measure,
+      staffIndex: best.n.staffIndex,
+      expectedMidi: best.n.midi,
+      playedMidi: note,
+      tExpectedMs: Math.round(best.n.tExpected * 1000),
+      tPlayedMs: Math.round(ac.currentTime * 1000),
+      deltaMs: Math.round(best.delta),
+      correctPitch: best.correctPitch,
+      inTime: within
+    };
+    session.results.push(rec);
+    if (session.results.length % 16 === 0) localforage.setItem(session.id, session);
+
+    // UI & cursor
+    if (best.correctPitch) {
+      bubble(`✔ ${midiName(note)} ${within ? '' : '(Δ ' + Math.abs(rec.deltaMs) + ' ms)'}`, within ? 'ok' : 'warn');
+      try { cursor.next(); } catch {}
+      // If we passed B, loop back to A
+      if (Bidx != null) {
+        const nextIdx = expected.findIndex(n => !n.hit);
+        if (nextIdx > Bidx) {
+          // reset hits in [A,B] and cursor to A
+          expected.slice(Aidx, Bidx + 1).forEach(n => n.hit = false);
+          try { cursor.reset(); for (let i=0;i<Aidx;i++) cursor.next(); } catch {}
+        }
+      }
+    } else {
+      bubble(`✖ ${midiName(note)} (want ${midiName(best.n.midi)})`, 'bad');
+    }
+
+    updateStats();
+  }
+
+  function updateStats() {
+    const rs = session?.results || [];
+    if (!rs.length) return;
+    const correct = rs.filter(r => r.correctPitch).length;
+    const inTime = rs.filter(r => r.correctPitch && r.inTime).length;
+    const avgDelta = rs.reduce((a,r)=>a + Math.abs(r.deltaMs||0), 0) / rs.length;
+    el('statAcc').textContent = Math.round(100*correct/rs.length) + '%';
+    el('statOnTime').textContent = Math.round(100*inTime/rs.length) + '%';
+    el('statAvgDelta').textContent = Math.round(avgDelta);
+
+    // charts per-measure accuracy & delta spread
+    const byM = new Map();
+    rs.forEach(r => {
+      const m = byM.get(r.measure) || { ok:0, tot:0, deltas:[] };
+      m.tot++; if (r.correctPitch && r.inTime) m.ok++;
+      m.deltas.push(r.deltaMs); byM.set(r.measure, m);
+    });
+    const labels = [...byM.keys()].map(n => 'M'+n);
+    const acc = [...byM.values()].map(m => Math.round(100*m.ok/m.tot));
+    const deltas = [...byM.values()].map(m => Math.round(m.deltas.reduce((a,b)=>a+Math.abs(b),0)/m.deltas.length));
+    charts.acc.data.labels = labels; charts.acc.data.datasets[0].data = acc; charts.acc.update('none');
+    charts.delta.data.labels = labels; charts.delta.data.datasets[0].data = deltas; charts.delta.update('none');
+  }
+
+  // ===================== Export =====================
+  function exportJSON() {
+    const blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
+    saveAs(blob, `${session.pieceTitle.replace(/\s+/g,'_')}_${session.id}.json`);
+  }
+  function exportCSV() {
+    const header = 'measure,expectedMidi,playedMidi,deltaMs,correctPitch,inTime\n';
+    const rows = session.results.map(r => [r.measure,r.expectedMidi,r.playedMidi,r.deltaMs,r.correctPitch,r.inTime].join(','));
+    const blob = new Blob([header + rows.join('\n')], { type: 'text/csv' });
+    saveAs(blob, `${session.pieceTitle.replace(/\s+/g,'_')}_${session.id}.csv`);
+  }
+
+  // ===================== Charts =====================
+  const charts = {
+    acc: new Chart(el('chartAcc'), { type: 'bar', data: { labels: [], datasets: [{ label: 'Accuracy %', data: [] }] }, options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, max: 100 } } } }),
+    delta: new Chart(el('chartDelta'), { type: 'bar', data: { labels: [], datasets: [{ label: 'Avg |Δ| ms', data: [] }] }, options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } } })
+  };
+
+  // ===================== UI Wiring =====================
+  el('btnOpen').addEventListener('click', ()=> el('fileChooser').click());
+  el('fileChooser').addEventListener('change', (e)=> { if (e.target.files?.[0]) loadMusicXMLFromFile(e.target.files[0]); });
+  el('bpm').addEventListener('input', (e)=> { el('bpmVal').textContent = e.target.value; Tone.Transport.bpm.value = +e.target.value; expected = buildExpected(osmd); });
+  el('transpose').addEventListener('change', ()=> { if (osmd) { expected = buildExpected(osmd); bubble('Applied transpose.', 'warn'); } });
+
+  el('btnStart').addEventListener('click', async ()=>{
+    if (!osmd) { alert('Open a MusicXML file first.'); return; }
+    await tone.init();
+    tone.scheduleMetronome();
+
+    // count-in 1 bar
+    const now = Tone.now();
+    for (let i=0;i<4;i++) clickSynth.triggerAttackRelease('C4', 0.03, now + i*Tone.Time('4n'));
+
+    // compute timings relative to AudioContext start
+    const secPerBeat = 60 / (+el('bpm').value);
+    const startAt = ac.currentTime + Tone.Time('1m').toSeconds(); // after 1 bar count-in
+    let baseMeasure = expected[0]?.measure || 1;
+    let baseBeatOffset = 0;
+    expected.forEach(n => {
+      if (n.measure !== baseMeasure) { baseBeatOffset += 4; baseMeasure = n.measure; }
+      n.tExpected = startAt + (baseBeatOffset + n.beat) * secPerBeat;
+      n.hit = false;
+    });
+
+    session = newSession(osmd.Sheet?.TitleString || 'Untitled');
+    await localforage.setItem(session.id, session);
+
+    playing = true; bubble('Listening… play along!', 'warn');
+    await tone.start();
+  });
+
+  el('btnStop').addEventListener('click', ()=>{
+    playing = false; tone.stop(); bubble('Stopped.', '');
+    updateStats();
+  });
+
+  el('btnRepeatMeasure').addEventListener('click', ()=>{
+    if (!expected.length) return;
+    const idx = expected.findIndex(n => !n.hit);
+    const curM = idx>=0 ? expected[idx].measure : expected[expected.length-1].measure;
+    const first = expected.findIndex(n => n.measure === curM);
+    const last  = expected.map((n,i)=>({n,i})).filter(x=>x.n.measure===curM).pop().i;
+    Aidx = first; Bidx = last; el('abStatus').textContent = `Loop M${curM}`;
+    bubble(`Looping measure ${curM}`, 'warn');
+  });
+
+  el('btnAB').addEventListener('click', ()=>{
+    const idx = expected.findIndex(n => !n.hit);
+    if (Aidx == null) { Aidx = Math.max(0, idx); bubble(`A set at note #${Aidx+1}`, 'warn'); el('abStatus').textContent = `A=#${Aidx+1}`; return; }
+    if (Bidx == null) { Bidx = Math.max(Aidx, idx+8); bubble(`B set at note #${Bidx+1}`, 'warn'); el('abStatus').textContent = `A=#${Aidx+1} · B=#${Bidx+1}`; return; }
+    Aidx = Bidx = null; el('abStatus').textContent = ''; bubble('A/B loop cleared.', '');
+  });
+
+  el('btnExportJSON').addEventListener('click', exportJSON);
+  el('btnExportCSV').addEventListener('click', exportCSV);
+
+  // ===================== Boot =====================
+  (async function boot(){
+    await initMIDI();
+    el('status').textContent = 'Ready. Open Web MIDI Browser, connect keyboard, and load a score.';
+
+    // Light PWA: inlined manifest + SW via Blob so we remain single-file
+    const manifest = { name: 'Maestro Practice', short_name: 'Maestro', display: 'standalone', start_url: '.', background_color: '#ffffff', theme_color: '#111827' };
+    const manBlob = new Blob([JSON.stringify(manifest)], {type:'application/json'});
+    const manURL = URL.createObjectURL(manBlob);
+    const link = document.createElement('link'); link.rel='manifest'; link.href=manURL; document.head.appendChild(link);
+
+    if ('serviceWorker' in navigator) {
+      const swCode = `self.addEventListener('install',e=>{e.waitUntil(caches.open('maestro-v1').then(c=>c.addAll(['./'])))});self.addEventListener('fetch',e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request)))})`;
+      const blob = new Blob([swCode], {type: 'text/javascript'});
+      const url = URL.createObjectURL(blob);
+      try { await navigator.serviceWorker.register(url); } catch {}
+    }
+  })();
+  </script>
+</body>
+</html>
